@@ -43,7 +43,6 @@ def calc_plant_available_water(paw_day_before, precipitation, irrigation, transp
     # T_i: transpiration
     # D_i: deep drainage
     # R_i: surface runoff
-    # alpha = 0.096, beta = ddc, zeta = rzd, eta = 65 ;
     # https://acsess.onlinelibrary.wiley.com/doi/full/10.2134/agronj2011.0286
     plant_available_water = paw_day_before + precipitation + irrigation - transpiration
     deep_drainage = max(0, (deep_drainage_coef * root_zone_depth) * (plant_available_water - water_holding_capacity))
@@ -132,20 +131,80 @@ def calc_f_solar_water(f_water):
 
 
 class SimpleCropModelEnv(gym.Env):
-    def __init__(self):
+    def __init__(self, start_date):
         self.cumulative_mean_temp = 0
         self.cumulative_biomass = 0
         self.rad_50p_senescence = None
         self.plant_available_water = 0
 
+        self.day = start_date
+        self.latitude = LAT  # todo: change to parameter
+        self.elevation = ELEV  # todo: change to parameter
+
         # crop parameters
         self.crop_temp_base = None
+        self.crop_temp_opt = None
+        self.crop_RUE = None
+        self.crop_rad_50p_growth = None
+        self.crop_rad_50p_senescence = None
+        self.crop_maturity_temp = None
+        self.crop_rad_50p_max_heat = None
+        self.crop_rad_50p_max_water = None
+        self.crop_heat_stress_thresh = None
+        self.crop_heat_stress_extreme = None
+        self.crop_drought_stress_sensitivity = None
+        self.crop_deep_drainage_coef = None
+        self.crop_water_holding_capacity = None
+        self.crop_runoff_curve_number = None
+        self.crop_root_zone_depth = None
+        self.crop_co2_sensitivity = None
+        self.crop_harvest_index = None
+
+        # TBD
+        self.weather_schedule = {}  # todo: how best to implement this... object? dict?
 
     def step(self, action):
+
+        if action == 'harvest':
+            # todo: craft state
+            return {}, calc_yield(self.cumulative_biomass, self.crop_harvest_index), True, {}
+
         # exterior parameters needed
         day_mean_temp = 20
 
         self.cumulative_mean_temp += delta_cumulative_temp(day_mean_temp, self.crop_temp_base)
+
+        rad_day = self.weather_schedule[self.day]['radiation']
+        mean_temp_day = self.weather_schedule[self.day]['mean_temp']
+        max_temp_day = self.weather_schedule[self.day]['max_temp']
+        min_temp_day = self.weather_schedule[self.day]['min_temp']
+        avg_vapor_pressure = self.weather_schedule[self.day]['avg_vapor_pressure']
+        avg_wind = self.weather_schedule[self.day]['avg_wind']
+        precipitation = self.weather_schedule[self.day]['precipitation']
+        irrigation = action['irrigation']  # todo: action space def?
+        co2_day = self.weather_schedule[self.day]['co2']
+
+        f_heat = calc_f_heat(max_temp_day, self.crop_heat_stress_thresh, self.crop_heat_stress_extreme)
+        ref_evapotranspiration = penman_monteith(self.day, LAT, ELEV, min_temp_day, max_temp_day, rad_day,
+                                                 avg_vapor_pressure, avg_wind)
+        transpiration = calc_transpiration(ref_evapotranspiration, self.plant_available_water)
+        self.plant_available_water = calc_plant_available_water(self.plant_available_water, precipitation, irrigation,
+                                                                transpiration, self.crop_deep_drainage_coef,
+                                                                self.crop_root_zone_depth,
+                                                                self.crop_water_holding_capacity,
+                                                                self.crop_runoff_curve_number)
+        arid_index = calc_arid(transpiration, ref_evapotranspiration)
+        f_water = calc_f_water(self.crop_drought_stress_sensitivity, arid_index)
+        self.crop_rad_50p_senescence = calc_rad_50p_senescence(self.crop_rad_50p_senescence, self.crop_rad_50p_max_heat,
+                                                               self.crop_rad_50p_max_water, f_heat, f_water)
+        f_solar = calc_f_solar(self.cumulative_mean_temp, self.crop_rad_50p_growth, self.crop_maturity_temp,
+                               self.crop_rad_50p_senescence)
+        f_co2 = calc_f_co2(self.crop_co2_sensitivity, co2_day)
+        f_temp = calc_f_temp(mean_temp_day, self.crop_temp_base, self.crop_temp_opt)
+        biomass_rate = calc_biomass_rate(rad_day, f_solar, self.crop_RUE, f_co2, f_temp, f_heat, f_water)
+        self.cumulative_biomass += calc_cumulative_biomass(self.cumulative_biomass, biomass_rate)
+        # todo: craft state, reward can be noisy reading of biomass?
+        return {}, 0, False, {}
 
     def reset(self):
         pass
