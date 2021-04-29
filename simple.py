@@ -35,19 +35,27 @@ def dq_d_temp(temp):
     return front * np.exp(b * temp / (temp + c))
 
 
-def calc_plant_available_water(paw_day_before, precipitation, irrigation, transpiration, deep_drainage_coef,
+def calc_plant_available_water(rzaw_day_before, precipitation, irrigation, transpiration, deep_drainage_coef,
                                root_zone_depth, water_holding_capacity, runoff_curve_number):
+    # Note: Plant available water == Available water content (AWC)
     # T_i = min(alpha * zeta * theta^(ad)_{a, i-1}, ET0_i) = min(alpha * PAW_{i-1}, ET0_i)
     # ~ min(alpha * W, ET0_i)
-    # W = W_{i-1} + P_i + I_i - T_i - D_i - R_i
+    # PAW_i = theta^(ad)_{a, i-1} = W_i / zeta
+    # W_i = W_{i-1} + P_i + I_i - T_i - D_i - R_i
     # P_i: precipitation on day i in mm
     # I_i: irrigation on day i in mm
     # T_i: transpiration
     # D_i: deep drainage
     # R_i: surface runoff
     # https://acsess.onlinelibrary.wiley.com/doi/full/10.2134/agronj2011.0286
-    plant_available_water = paw_day_before + precipitation + irrigation - transpiration
-    deep_drainage = max(0, (deep_drainage_coef * root_zone_depth) * (plant_available_water - water_holding_capacity))
+
+    # get available water before runoff and drainage
+    root_zone_available_water = rzaw_day_before + precipitation + irrigation - transpiration
+    deep_drainage = max(0,
+                        (
+                                deep_drainage_coef * root_zone_depth) *
+                        (root_zone_available_water / root_zone_depth - water_holding_capacity)
+                        )
     potential_maximum_retention = 25400 / runoff_curve_number - 254
     initial_abstraction = 0.2 * potential_maximum_retention
     if precipitation > initial_abstraction:
@@ -55,8 +63,8 @@ def calc_plant_available_water(paw_day_before, precipitation, irrigation, transp
                           (precipitation - initial_abstraction + potential_maximum_retention))
     else:
         surface_runoff = 0
-    plant_available_water = plant_available_water - deep_drainage - surface_runoff
-    return plant_available_water
+    root_zone_available_water = root_zone_available_water - deep_drainage - surface_runoff
+    return root_zone_available_water / root_zone_depth, root_zone_available_water
 
 
 def calc_transpiration(ref_evapotranspiration, plant_available_water):
@@ -133,6 +141,8 @@ def calc_f_solar_water(f_water):
 
 
 class RandomWeatherSchedule:
+    """should subclass from some type of WeatherSchedule object that validates settings?"""
+
     def __init__(self, num_days):
         # all made up data, loosely based on starting May 1st in Hamer, ID
         self.num_days = num_days
@@ -152,98 +162,204 @@ class RandomWeatherSchedule:
         })
 
 
-class CropParametersSpec:
+class WeatherForecastSTDs:
     def __init__(self):
-        pass
+        self.__dict__.update({
+            'max_temp': 3,  # degrees C
+            'min_temp': 2,  # degrees C
+            'precipitation': 3,  # mm
+            'radiation': 1,  # MJ/(m**2 * day)
+            'co2': 1,  # PPM
+            'avg_vapor_pressure': 1,  # hPa
+            'mean_temp': 2,  # degrees C; not in SIMPLE model
+            'avg_wind': 6  # m/s; not in SIMPLE model
+        })
+
+
+class PotatoRussetUSACropParametersSpec:
+    """should subclass from some type of CropSpec object that validates settings?"""
+
+    def __init__(self):
+        # crop parameters
+        self.temp_base = 4  # T_base
+        self.temp_opt = 22  # T_opt
+        self.RUE = 1.30  # RUE
+        self.rad_50p_growth = 500  # I_50A
+        self.rad_50p_senescence = 400  # I_50B
+        self.maturity_temp = 2300  # T_sum
+        self.rad_50p_max_heat = 50  # I_50maxH
+        self.rad_50p_max_water = 30  # I_50maxW
+        self.heat_stress_thresh = 34  # T_max
+        self.heat_stress_extreme = 45  # T_ext
+        self.drought_stress_sensitivity = 0.4  # S_water
+        self.deep_drainage_coef = 0.8  # DDC
+        self.water_holding_capacity = 0.1  # AWC
+        self.runoff_curve_number = 64  # RCN
+        self.root_zone_depth = 1200  # RZD
+        self.co2_sensitivity = 0.10  # S_CO2
+        self.harvest_index = 0.9  # HI
 
 
 class SimpleCropModelEnv(gym.Env):
     def __init__(self, sowing_date,
+                 num_growing_days,
                  weather_schedule,
+                 weather_forecast_stds,
                  latitude,
                  elevation,
                  crop_parameters,
                  initial_biomass=0,  # Kg
                  initial_cumulative_temp=0,  # degrees C day
                  # initial_f_solar=0,  # unit-less; todo: paper says this is an init param, but where would it be used?
-                 seed=None):
-        # tracking variables
-        self.cumulative_mean_temp = initial_cumulative_temp  # TT variable in paper
-        self.cumulative_biomass = initial_biomass
-        self.plant_available_water = 0
-        self.date = sowing_date
-        self.day = 0
+                 initial_root_zone_available_water_content=None,  # not a parameter in SIMPLE, but reasonable to vary,
+                 #  https://acsess.onlinelibrary.wiley.com/doi/full/10.2134/agronj2011.0286 assumes initial value to
+                 #  be equal to the available water capacity (AWC) in their crop model comparison
+                 seed=None,
+                 cumulative_biomass_std=1.0,
+                 root_zone_available_water_std=1.0):
+
+        # simulation parameters
+        self.num_growing_days = num_growing_days
 
         # location parameters
         self.latitude = latitude
         self.elevation = elevation
 
         # crop parameters
-        self.crop_temp_base = None
-        self.crop_temp_opt = None
-        self.crop_RUE = None
-        self.crop_rad_50p_growth = None
-        self.crop_rad_50p_senescence = None
-        self.crop_maturity_temp = None
-        self.crop_rad_50p_max_heat = None
-        self.crop_rad_50p_max_water = None
-        self.crop_heat_stress_thresh = None
-        self.crop_heat_stress_extreme = None
-        self.crop_drought_stress_sensitivity = None
-        self.crop_deep_drainage_coef = None
-        self.crop_water_holding_capacity = None
-        self.crop_runoff_curve_number = None
-        self.crop_root_zone_depth = None
-        self.crop_co2_sensitivity = None
-        self.crop_harvest_index = None
+        self.crop_temp_base = crop_parameters.temp_base
+        self.crop_temp_opt = crop_parameters.temp_opt
+        self.crop_RUE = crop_parameters.RUE
+        self.crop_rad_50p_growth = crop_parameters.rad_50p_growth
+        self.crop_rad_50p_senescence = crop_parameters.rad_50p_senescence
+        self.crop_maturity_temp = crop_parameters.maturity_temp
+        self.crop_rad_50p_max_heat = crop_parameters.rad_50p_max_heat
+        self.crop_rad_50p_max_water = crop_parameters.rad_50p_max_water
+        self.crop_heat_stress_thresh = crop_parameters.heat_stress_thresh
+        self.crop_heat_stress_extreme = crop_parameters.heat_stress_extreme
+        self.crop_drought_stress_sensitivity = crop_parameters.drought_stress_sensitivity
+        self.crop_deep_drainage_coef = crop_parameters.deep_drainage_coef
+        self.crop_water_holding_capacity = crop_parameters.water_holding_capacity
+        self.crop_runoff_curve_number = crop_parameters.runoff_curve_number
+        self.crop_root_zone_depth = crop_parameters.root_zone_depth
+        self.crop_co2_sensitivity = crop_parameters.co2_sensitivity
+        self.crop_harvest_index = crop_parameters.harvest_index
 
-        # Non-SIMPLE parameters
-        self.reward_noise_sigma = 1.0
+        # variables for reset
+        self.init_cumulative_temp = initial_cumulative_temp
+        self.init_biomass = initial_biomass
+        self.sowing_date = sowing_date
+
+        # root zone available water (W_i) = root zone available water content (theta^{ad}_{a, i} or PAW) times the root
+        #   zone depth (RZD), i.e. W_i =  theta^{ad}_{a, i} * RZD. See:
+        #   https://acsess.onlinelibrary.wiley.com/doi/full/10.2134/agronj2011.0286, which also justifies the initial
+        #   condition shown here in the crop comparison section
+        if initial_root_zone_available_water_content is None:
+            initial_root_zone_available_water_content = self.crop_water_holding_capacity
+        self.initial_root_zone_available_water_content = initial_root_zone_available_water_content
+        self.initial_root_zone_available_water = initial_root_zone_available_water_content * self.crop_root_zone_depth
+
+        # tracking variables
+        self.cumulative_mean_temp = None  # TT variable in paper
+        self.cumulative_biomass = None
+        self.root_zone_available_water = None
+        self.plant_available_water = None
+        self.date = None
+        self.day = None
+
+        # Randomization parameters
+        self.cumulative_biomass_sigma = cumulative_biomass_std
+        self.root_zone_available_water_sigma = root_zone_available_water_std
         self.rng = np.random.default_rng(seed)
 
         # weather data
-        self.weather_schedule = weather_schedule  # todo: how best to implement this... object? dict?
+        self.weather_schedule = weather_schedule
+        self.weather_forecast_stds = weather_forecast_stds
+
+    def weather_info(self, day, noisy=False):
+        """return a weather info for a certain day"""
+        if day >= self.num_growing_days:
+            return np.array([])
+        if not noisy:
+            return np.array(
+                [self.weather_schedule.max_temp[day],  # degrees C
+                 self.weather_schedule.min_temp[day],  # degrees C
+                 self.weather_schedule.precipitation[day],  # mm
+                 self.weather_schedule.radiation[day],  # MJ/(m**2 * day)
+                 self.weather_schedule.co2[day],  # PPM
+                 self.weather_schedule.avg_vapor_pressure[day],  # hPa
+                 self.weather_schedule.mean_temp[day],  # degrees C; not in SIMPLE model
+                 self.weather_schedule.avg_wind[day]  # m/s; not in SIMPLE model
+                 ]
+            )
+        else:
+            return np.array(
+                [self.rng.normal(self.weather_schedule.max_temp[day], self.weather_forecast_stds.max_temp),
+                 self.rng.normal(self.weather_schedule.min_temp[day], self.weather_forecast_stds.min_temp),
+                 self.rng.normal(self.weather_schedule.precipitation[day], self.weather_forecast_stds.precipitation),
+                 self.rng.normal(self.weather_schedule.radiation[day], self.weather_forecast_stds.radiation),
+                 self.rng.normal(self.weather_schedule.co2[day], self.weather_forecast_stds.co2),
+                 self.rng.normal(self.weather_schedule.avg_vapor_pressure[day],
+                                 self.weather_forecast_stds.avg_vapor_pressure),
+                 self.rng.normal(self.weather_schedule.mean_temp[day], self.weather_forecast_stds.mean_temp),
+                 self.rng.normal(self.weather_schedule.avg_wind[day], self.weather_forecast_stds.avg_wind)
+                 ]
+            )
 
     def create_state(self):
-        return {}
-
-    def create_intermediate_reward(self):
         """
-        Mid episode reward. Currently a noisy reading of the biomass because that is what we have a measurement of in
-            the simulator. Is it reasonable to assume that we can estimate something like biomass by observation the
-            size/health of the plants?
+        Things to include in the state would be:
+            - Actual cumulative biomass
+            - Noisy reading of cumulative biomass (such as might be estimated from an image of the plant?)
+            - Cumulative mean temp (seems relatively measurable)
+            - Days since sowing date
+            - Weather from last day
+            - Next day's weather forecast (perfect)
+            - Noisy "prediction" of next day's weather forecast
+            - Root zone available water reading (like a soil measurement?)
+            - Noisy reading of root zone available water
         """
-        # todo: Is this a legitimate reward signal?
-        return max(0, self.rng.normal(self.cumulative_biomass, self.reward_noise_sigma))
+        return {'cumulative_biomass': self.cumulative_biomass,
+                'cumulative_biomass_noisy': max(0, self.rng.normal(self.cumulative_biomass,
+                                                                   self.cumulative_biomass_sigma)),
+                'cumulative_mean_temp': self.cumulative_mean_temp,
+                'day': self.day,
+                'weather_today': self.weather_info(self.day),
+                'weather_tomorrow': self.weather_info(self.day + 1),
+                'weather_tomorrow_forecast': self.weather_info(self.day + 1, noisy=True),
+                'root_zone_available_water': self.root_zone_available_water,
+                'root_zone_available_water_noisy': max(0, self.rng.normal(self.root_zone_available_water,
+                                                                          self.root_zone_available_water_sigma))
+                }
 
     def step(self, action):
-        if action == 'harvest':
-            # todo: craft state
-            return self.create_state(), calc_yield(self.cumulative_biomass, self.crop_harvest_index), True, {}
-
-        rad_day = self.weather_schedule['radiation'][self.day]
-        mean_temp_day = self.weather_schedule['mean_temp'][self.day]
-        max_temp_day = self.weather_schedule['max_temp'][self.day]
-        min_temp_day = self.weather_schedule['min_temp'][self.day]
-        avg_vapor_pressure = self.weather_schedule['avg_vapor_pressure'][self.day]
-        avg_wind = self.weather_schedule['avg_wind'][self.day]
-        precipitation = self.weather_schedule['precipitation'][self.day]
-        irrigation = action['irrigation']  # todo: action space def?
-        co2_day = self.weather_schedule['co2'][self.day]
+        rad_day = self.weather_schedule.radiation[self.day]
+        mean_temp_day = self.weather_schedule.mean_temp[self.day]
+        max_temp_day = self.weather_schedule.max_temp[self.day]
+        min_temp_day = self.weather_schedule.min_temp[self.day]
+        avg_vapor_pressure = self.weather_schedule.avg_vapor_pressure[self.day]
+        avg_wind = self.weather_schedule.avg_wind[self.day]
+        precipitation = self.weather_schedule.precipitation[self.day]
+        irrigation = action
+        co2_day = self.weather_schedule.co2[self.day]
 
         self.cumulative_mean_temp += delta_cumulative_temp(mean_temp_day, self.crop_temp_base)
         f_heat = calc_f_heat(max_temp_day, self.crop_heat_stress_thresh, self.crop_heat_stress_extreme)
         # penman_monteith function has rads in Joules, while rest of SIMPLE uses megajoules:
         # https://github.com/ajwdewit/pcse/blob/c40362be6a176dabe42a39b4526015b41cf23c48/pcse/util.py#L129
         rad_day_joules = 1e6 * rad_day
-        ref_evapotranspiration = penman_monteith(self.day, self.latitude, self.elevation, min_temp_day, max_temp_day,
+        ref_evapotranspiration = penman_monteith(self.date, self.latitude, self.elevation, min_temp_day, max_temp_day,
                                                  rad_day_joules, avg_vapor_pressure, avg_wind)
-        transpiration = calc_transpiration(ref_evapotranspiration, self.plant_available_water)
-        self.plant_available_water = calc_plant_available_water(self.plant_available_water, precipitation, irrigation,
-                                                                transpiration, self.crop_deep_drainage_coef,
-                                                                self.crop_root_zone_depth,
-                                                                self.crop_water_holding_capacity,
-                                                                self.crop_runoff_curve_number)
+        transpiration = calc_transpiration(ref_evapotranspiration, self.plant_available_water)  # use PAW from today
+        # update PAW
+        self.plant_available_water, self.root_zone_available_water \
+            = calc_plant_available_water(self.root_zone_available_water,
+                                         precipitation, irrigation,
+                                         transpiration,
+                                         self.crop_deep_drainage_coef,
+                                         self.crop_root_zone_depth,
+                                         self.crop_water_holding_capacity,
+                                         self.crop_runoff_curve_number)
+        # todo: Validate ARID values
         arid_index = calc_arid(transpiration, ref_evapotranspiration)
         f_water = calc_f_water(self.crop_drought_stress_sensitivity, arid_index)
         self.crop_rad_50p_senescence = calc_rad_50p_senescence(self.crop_rad_50p_senescence, self.crop_rad_50p_max_heat,
@@ -254,14 +370,27 @@ class SimpleCropModelEnv(gym.Env):
         f_temp = calc_f_temp(mean_temp_day, self.crop_temp_base, self.crop_temp_opt)
         biomass_rate = calc_biomass_rate(rad_day, f_solar, self.crop_RUE, f_co2, f_temp, f_heat, f_water)
         self.cumulative_biomass = calc_cumulative_biomass(self.cumulative_biomass, biomass_rate)
-        # todo: craft state, reward can be noisy reading of biomass?
+
+        # do this before updating day to get accurate states
+        state = self.create_state()
+
+        if self.day >= self.num_growing_days - 1:
+            return state, calc_yield(self.cumulative_biomass, self.crop_harvest_index), True, {}
 
         self.day += 1
         self.date += datetime.timedelta(days=1)
-        return self.create_state(), self.create_intermediate_reward(), False, {}
+        return state, 0, False, {}
 
     def reset(self):
-        pass
+        self.cumulative_mean_temp = self.init_cumulative_temp  # TT variable in paper
+        self.cumulative_biomass = self.init_biomass
+        # root zone available water (W_i) = root zone available water content (theta^{ad}_{a, i} or PAW) times the root
+        # zone depth (RZD)
+        self.root_zone_available_water = self.initial_root_zone_available_water
+        self.plant_available_water = self.initial_root_zone_available_water_content
+        self.date = self.sowing_date
+        self.day = 0
+        return self.create_state()
 
     def render(self, mode='human'):
         pass
@@ -283,3 +412,19 @@ if __name__ == "__main__":
     ARID = calc_arid(T_i, ET0)
 
     print(ARID)
+
+    growth_days = 10
+    start_date = datetime.datetime(day=1, month=5, year=2021)
+    weather = RandomWeatherSchedule(growth_days)
+    weather_stds = WeatherForecastSTDs()
+    crop_params = PotatoRussetUSACropParametersSpec()
+    env = SimpleCropModelEnv(start_date, growth_days, weather, WeatherForecastSTDs(), LAT, ELEV, crop_params, seed=0)
+    env.reset()
+    done = False
+    iter = 0
+    while not done and iter < 1000000:
+        action = 0.1
+        s, r, done, info = env.step(action)
+        print(s)
+        print("reward: ", r)
+        iter += 1
