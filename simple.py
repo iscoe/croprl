@@ -10,6 +10,8 @@ WIND2 = 10.299802  # average wind speed in Hamer, ID in m/s (at 2 meter?)
 VAP = 4.04  # vapor pressure in Hamer ID on 24 Apr 2021 based on a temp of 54F and dewpoint of 22, and according to
 #   https://www.weather.gov/epz/wxcalc_vaporpressure
 F_SOLAR_MAX = 0.95  # the maximum fraction of radiation interception that a crop can reach, governed by plant spacings,
+
+
 #   but typically set to 0.95 according to SIMPLE model paper:
 #   https://www.sciencedirect.com/science/article/pii/S1161030118304234#bib0205
 
@@ -130,16 +132,51 @@ def calc_f_solar_water(f_water):
     return 0.9 + f_water if f_water < 0.1 else 1.0
 
 
-class SimpleCropModelEnv(gym.Env):
-    def __init__(self, start_date):
-        self.cumulative_mean_temp = 0
-        self.cumulative_biomass = 0
-        self.rad_50p_senescence = None
-        self.plant_available_water = 0
+class RandomWeatherSchedule:
+    def __init__(self, num_days):
+        # all made up data, loosely based on starting May 1st in Hamer, ID
+        self.num_days = num_days
+        rng = np.random.default_rng()
+        max_temp = rng.normal(15, 3, size=num_days)  # degrees C
+        min_temp = rng.normal(2, 2, size=num_days)  # degrees C
+        mean_temp = rng.normal((max_temp - min_temp) / 2, 2, size=num_days)  # degrees C
+        self.__dict__.update({
+            'max_temp': max_temp,  # degrees C
+            'min_temp': min_temp,  # degrees C
+            'precipitation': np.maximum(0, rng.normal(0, 3, size=num_days)),  # mm
+            'radiation': np.maximum(0, rng.normal(22, 1, size=num_days)),  # MJ/(m**2 * day)
+            'co2': rng.normal(412, 1, size=num_days),  # PPM
+            'avg_vapor_pressure': np.maximum(0, rng.normal(4.04, 1, size=num_days)),  # hPa
+            'mean_temp': mean_temp,  # degrees C; not in SIMPLE model
+            'avg_wind': np.maximum(0, rng.normal(8, 6, size=num_days))  # m/s; not in SIMPLE model
+        })
 
-        self.day = start_date
-        self.latitude = LAT  # todo: change to parameter
-        self.elevation = ELEV  # todo: change to parameter
+
+class CropParametersSpec:
+    def __init__(self):
+        pass
+
+
+class SimpleCropModelEnv(gym.Env):
+    def __init__(self, sowing_date,
+                 weather_schedule,
+                 latitude,
+                 elevation,
+                 crop_parameters,
+                 initial_biomass=0,  # Kg
+                 initial_cumulative_temp=0,  # degrees C day
+                 # initial_f_solar=0,  # unit-less; todo: paper says this is an init param, but where would it be used?
+                 seed=None):
+        # tracking variables
+        self.cumulative_mean_temp = initial_cumulative_temp  # TT variable in paper
+        self.cumulative_biomass = initial_biomass
+        self.plant_available_water = 0
+        self.date = sowing_date
+        self.day = 0
+
+        # location parameters
+        self.latitude = latitude
+        self.elevation = elevation
 
         # crop parameters
         self.crop_temp_base = None
@@ -160,33 +197,47 @@ class SimpleCropModelEnv(gym.Env):
         self.crop_co2_sensitivity = None
         self.crop_harvest_index = None
 
-        # TBD
-        self.weather_schedule = {}  # todo: how best to implement this... object? dict?
+        # Non-SIMPLE parameters
+        self.reward_noise_sigma = 1.0
+        self.rng = np.random.default_rng(seed)
+
+        # weather data
+        self.weather_schedule = weather_schedule  # todo: how best to implement this... object? dict?
+
+    def create_state(self):
+        return {}
+
+    def create_intermediate_reward(self):
+        """
+        Mid episode reward. Currently a noisy reading of the biomass because that is what we have a measurement of in
+            the simulator. Is it reasonable to assume that we can estimate something like biomass by observation the
+            size/health of the plants?
+        """
+        # todo: Is this a legitimate reward signal?
+        return max(0, self.rng.normal(self.cumulative_biomass, self.reward_noise_sigma))
 
     def step(self, action):
-
         if action == 'harvest':
             # todo: craft state
-            return {}, calc_yield(self.cumulative_biomass, self.crop_harvest_index), True, {}
+            return self.create_state(), calc_yield(self.cumulative_biomass, self.crop_harvest_index), True, {}
 
-        # exterior parameters needed
-        day_mean_temp = 20
-
-        self.cumulative_mean_temp += delta_cumulative_temp(day_mean_temp, self.crop_temp_base)
-
-        rad_day = self.weather_schedule[self.day]['radiation']
-        mean_temp_day = self.weather_schedule[self.day]['mean_temp']
-        max_temp_day = self.weather_schedule[self.day]['max_temp']
-        min_temp_day = self.weather_schedule[self.day]['min_temp']
-        avg_vapor_pressure = self.weather_schedule[self.day]['avg_vapor_pressure']
-        avg_wind = self.weather_schedule[self.day]['avg_wind']
-        precipitation = self.weather_schedule[self.day]['precipitation']
+        rad_day = self.weather_schedule['radiation'][self.day]
+        mean_temp_day = self.weather_schedule['mean_temp'][self.day]
+        max_temp_day = self.weather_schedule['max_temp'][self.day]
+        min_temp_day = self.weather_schedule['min_temp'][self.day]
+        avg_vapor_pressure = self.weather_schedule['avg_vapor_pressure'][self.day]
+        avg_wind = self.weather_schedule['avg_wind'][self.day]
+        precipitation = self.weather_schedule['precipitation'][self.day]
         irrigation = action['irrigation']  # todo: action space def?
-        co2_day = self.weather_schedule[self.day]['co2']
+        co2_day = self.weather_schedule['co2'][self.day]
 
+        self.cumulative_mean_temp += delta_cumulative_temp(mean_temp_day, self.crop_temp_base)
         f_heat = calc_f_heat(max_temp_day, self.crop_heat_stress_thresh, self.crop_heat_stress_extreme)
-        ref_evapotranspiration = penman_monteith(self.day, LAT, ELEV, min_temp_day, max_temp_day, rad_day,
-                                                 avg_vapor_pressure, avg_wind)
+        # penman_monteith function has rads in Joules, while rest of SIMPLE uses megajoules:
+        # https://github.com/ajwdewit/pcse/blob/c40362be6a176dabe42a39b4526015b41cf23c48/pcse/util.py#L129
+        rad_day_joules = 1e6 * rad_day
+        ref_evapotranspiration = penman_monteith(self.day, self.latitude, self.elevation, min_temp_day, max_temp_day,
+                                                 rad_day_joules, avg_vapor_pressure, avg_wind)
         transpiration = calc_transpiration(ref_evapotranspiration, self.plant_available_water)
         self.plant_available_water = calc_plant_available_water(self.plant_available_water, precipitation, irrigation,
                                                                 transpiration, self.crop_deep_drainage_coef,
@@ -202,9 +253,12 @@ class SimpleCropModelEnv(gym.Env):
         f_co2 = calc_f_co2(self.crop_co2_sensitivity, co2_day)
         f_temp = calc_f_temp(mean_temp_day, self.crop_temp_base, self.crop_temp_opt)
         biomass_rate = calc_biomass_rate(rad_day, f_solar, self.crop_RUE, f_co2, f_temp, f_heat, f_water)
-        self.cumulative_biomass += calc_cumulative_biomass(self.cumulative_biomass, biomass_rate)
+        self.cumulative_biomass = calc_cumulative_biomass(self.cumulative_biomass, biomass_rate)
         # todo: craft state, reward can be noisy reading of biomass?
-        return {}, 0, False, {}
+
+        self.day += 1
+        self.date += datetime.timedelta(days=1)
+        return self.create_state(), self.create_intermediate_reward(), False, {}
 
     def reset(self):
         pass
