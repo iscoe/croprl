@@ -35,12 +35,12 @@ def dq_d_temp(temp):
     return front * np.exp(b * temp / (temp + c))
 
 
-def calc_plant_available_water(rzaw_day_before, precipitation, irrigation, transpiration, deep_drainage_coef,
+def calc_plant_available_water(paw_day_before, precipitation, irrigation, transpiration, deep_drainage_coef,
                                root_zone_depth, water_holding_capacity, runoff_curve_number):
     # Note: Plant available water == Available water content (AWC)
     # T_i = min(alpha * zeta * theta^(ad)_{a, i-1}, ET0_i) = min(alpha * PAW_{i-1}, ET0_i)
     # ~ min(alpha * W, ET0_i)
-    # PAW_i = theta^(ad)_{a, i-1} = W_i / zeta
+    # PAW_i = zeta * theta^(ad)_{a, i-1} = zeta * (W_i / zeta) = W_i
     # W_i = W_{i-1} + P_i + I_i - T_i - D_i - R_i
     # P_i: precipitation on day i in mm
     # I_i: irrigation on day i in mm
@@ -50,11 +50,11 @@ def calc_plant_available_water(rzaw_day_before, precipitation, irrigation, trans
     # https://acsess.onlinelibrary.wiley.com/doi/full/10.2134/agronj2011.0286
 
     # get available water before runoff and drainage
-    root_zone_available_water = rzaw_day_before + precipitation + irrigation - transpiration
+    plant_available_water = paw_day_before + precipitation + irrigation - transpiration
     deep_drainage = max(0,
                         (
                                 deep_drainage_coef * root_zone_depth) *
-                        (root_zone_available_water / root_zone_depth - water_holding_capacity)
+                        (plant_available_water / root_zone_depth - water_holding_capacity)
                         )
     potential_maximum_retention = 25400 / runoff_curve_number - 254
     initial_abstraction = 0.2 * potential_maximum_retention
@@ -63,8 +63,9 @@ def calc_plant_available_water(rzaw_day_before, precipitation, irrigation, trans
                           (precipitation - initial_abstraction + potential_maximum_retention))
     else:
         surface_runoff = 0
-    root_zone_available_water = root_zone_available_water - deep_drainage - surface_runoff
-    return root_zone_available_water / root_zone_depth, root_zone_available_water
+    plant_available_water = plant_available_water - deep_drainage - surface_runoff
+    # PAW_i = zeta * theta^(ad)_{a, i-1} = zeta * (W_i / zeta) = W_i
+    return plant_available_water
 
 
 def calc_transpiration(ref_evapotranspiration, plant_available_water):
@@ -128,7 +129,14 @@ def calc_f_water(s_water, arid):
 
 
 def calc_arid(transpiration, ref_evapotranspiration):
-    return 1 - transpiration / ref_evapotranspiration
+    if ref_evapotranspiration > 0:
+        return 1 - transpiration / ref_evapotranspiration
+    else:
+        # case isn't deal with in https://www.sciencedirect.com/science/article/pii/S1161030118304234 or
+        # https://acsess.onlinelibrary.wiley.com/doi/full/10.2134/agronj2011.0286 that I know of, but this seems
+        # reasonable given transpiration will always be 0 if ref_evapotranspiration is 0, meaning no transpiration was
+        # possible that day (e.g. not enough sun/wind).
+        return 1
 
 
 def calc_rad_50p_senescence(rad_50p_before, rad_50p_max_heat, rad_50p_max_water, f_heat, f_water):
@@ -211,12 +219,12 @@ class SimpleCropModelEnv(gym.Env):
                  initial_biomass=0,  # Kg
                  initial_cumulative_temp=0,  # degrees C day
                  # initial_f_solar=0,  # unit-less; todo: paper says this is an init param, but where would it be used?
-                 initial_root_zone_available_water_content=None,  # not a parameter in SIMPLE, but reasonable to vary,
+                 initial_available_water_content=None,  # not an initial parameter in SIMPLE, but reasonable to vary,
                  #  https://acsess.onlinelibrary.wiley.com/doi/full/10.2134/agronj2011.0286 assumes initial value to
                  #  be equal to the available water capacity (AWC) in their crop model comparison
                  seed=None,
                  cumulative_biomass_std=1.0,
-                 root_zone_available_water_std=1.0):
+                 plant_available_water_std=1.0):
 
         # simulation parameters
         self.num_growing_days = num_growing_days
@@ -249,26 +257,25 @@ class SimpleCropModelEnv(gym.Env):
         self.init_biomass = initial_biomass
         self.sowing_date = sowing_date
 
-        # root zone available water (W_i) = root zone available water content (theta^{ad}_{a, i} or PAW) times the root
+        # root zone available water (W_i) = root zone available water content (theta^{ad}_{a, i}) times the root
         #   zone depth (RZD), i.e. W_i =  theta^{ad}_{a, i} * RZD. See:
         #   https://acsess.onlinelibrary.wiley.com/doi/full/10.2134/agronj2011.0286, which also justifies the initial
         #   condition shown here in the crop comparison section
-        if initial_root_zone_available_water_content is None:
-            initial_root_zone_available_water_content = self.crop_water_holding_capacity
-        self.initial_root_zone_available_water_content = initial_root_zone_available_water_content
-        self.initial_root_zone_available_water = initial_root_zone_available_water_content * self.crop_root_zone_depth
+        if initial_available_water_content is None:
+            initial_available_water_content = self.crop_water_holding_capacity
+        self.initial_available_water_content = initial_available_water_content  # unused, but saved for reference
+        self.initial_plant_available_water = initial_available_water_content * self.crop_root_zone_depth
 
         # tracking variables
         self.cumulative_mean_temp = None  # TT variable in paper
         self.cumulative_biomass = None
-        self.root_zone_available_water = None
         self.plant_available_water = None
         self.date = None
         self.day = None
 
         # Randomization parameters
         self.cumulative_biomass_sigma = cumulative_biomass_std
-        self.root_zone_available_water_sigma = root_zone_available_water_std
+        self.plant_available_water_sigma = plant_available_water_std
         self.rng = np.random.default_rng(seed)
 
         # weather data
@@ -326,9 +333,9 @@ class SimpleCropModelEnv(gym.Env):
                 'weather_today': self.weather_info(self.day),
                 'weather_tomorrow': self.weather_info(self.day + 1),
                 'weather_tomorrow_forecast': self.weather_info(self.day + 1, noisy=True),
-                'root_zone_available_water': self.root_zone_available_water,
-                'root_zone_available_water_noisy': max(0, self.rng.normal(self.root_zone_available_water,
-                                                                          self.root_zone_available_water_sigma))
+                'plant_available_water': self.plant_available_water,
+                'plant_available_water_noisy': max(0, self.rng.normal(self.plant_available_water,
+                                                                      self.plant_available_water_sigma))
                 }
 
     def step(self, action):
@@ -347,18 +354,19 @@ class SimpleCropModelEnv(gym.Env):
         # penman_monteith function has rads in Joules, while rest of SIMPLE uses megajoules:
         # https://github.com/ajwdewit/pcse/blob/c40362be6a176dabe42a39b4526015b41cf23c48/pcse/util.py#L129
         rad_day_joules = 1e6 * rad_day
+        if avg_wind == 0:
+            print(avg_wind)
         ref_evapotranspiration = penman_monteith(self.date, self.latitude, self.elevation, min_temp_day, max_temp_day,
                                                  rad_day_joules, avg_vapor_pressure, avg_wind)
         transpiration = calc_transpiration(ref_evapotranspiration, self.plant_available_water)  # use PAW from today
         # update PAW
-        self.plant_available_water, self.root_zone_available_water \
-            = calc_plant_available_water(self.root_zone_available_water,
-                                         precipitation, irrigation,
-                                         transpiration,
-                                         self.crop_deep_drainage_coef,
-                                         self.crop_root_zone_depth,
-                                         self.crop_water_holding_capacity,
-                                         self.crop_runoff_curve_number)
+        self.plant_available_water = calc_plant_available_water(self.plant_available_water,
+                                                                precipitation, irrigation,
+                                                                transpiration,
+                                                                self.crop_deep_drainage_coef,
+                                                                self.crop_root_zone_depth,
+                                                                self.crop_water_holding_capacity,
+                                                                self.crop_runoff_curve_number)
         # todo: Validate ARID values
         arid_index = calc_arid(transpiration, ref_evapotranspiration)
         f_water = calc_f_water(self.crop_drought_stress_sensitivity, arid_index)
@@ -386,8 +394,7 @@ class SimpleCropModelEnv(gym.Env):
         self.cumulative_biomass = self.init_biomass
         # root zone available water (W_i) = root zone available water content (theta^{ad}_{a, i} or PAW) times the root
         # zone depth (RZD)
-        self.root_zone_available_water = self.initial_root_zone_available_water
-        self.plant_available_water = self.initial_root_zone_available_water_content
+        self.plant_available_water = self.initial_plant_available_water
         self.date = self.sowing_date
         self.day = 0
         return self.create_state()
@@ -413,7 +420,7 @@ if __name__ == "__main__":
 
     print(ARID)
 
-    growth_days = 10
+    growth_days = 100
     start_date = datetime.datetime(day=1, month=5, year=2021)
     weather = RandomWeatherSchedule(growth_days)
     weather_stds = WeatherForecastSTDs()
@@ -423,8 +430,8 @@ if __name__ == "__main__":
     done = False
     iter = 0
     while not done and iter < 1000000:
-        action = 0.1
+        action = 100.0
         s, r, done, info = env.step(action)
-        print(s)
+        print(s['plant_available_water'])
         print("reward: ", r)
         iter += 1
