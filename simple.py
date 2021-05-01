@@ -10,29 +10,8 @@ WIND2 = 10.299802  # average wind speed in Hamer, ID in m/s (at 2 meter?)
 VAP = 4.04  # vapor pressure in Hamer ID on 24 Apr 2021 based on a temp of 54F and dewpoint of 22, and according to
 #   https://www.weather.gov/epz/wxcalc_vaporpressure
 F_SOLAR_MAX = 0.95  # the maximum fraction of radiation interception that a crop can reach, governed by plant spacings,
-
-
-#   but typically set to 0.95 according to SIMPLE model paper:
-#   https://www.sciencedirect.com/science/article/pii/S1161030118304234#bib0205
-
-
-def dq_d_temp(temp):
-    """
-    derivative of specific humidity/saturated vapour pressure at a given temperature
-    See:
-        - https://journals.ametsoc.org/view/journals/mwre/100/2/1520-0493_1972_100_0081_otaosh_2_3_co_2.xml?tab_body=pdf
-        - A COMPARISONOF THE PRIESTLEY-TAYLOR AND PENMAN METHODS FOR ESTIMATING REFERENCE CROP EVAPOTRANSPIRATION IN
-            TROPICAL COUNTRIES, H. GUNSTON and C.H. BATCHELOR
-        - https://journals.ametsoc.org/view/journals/apme/57/6/jamc-d-17-0334.1.xml
-
-        P_s = a * e^( bt / (t + c) )
-            where a = 610.94, b = 17.625, and c = 243.04
-
-        so d(P_s)/dt = (b * t / (t + c)) * ((b * (t + c) - b * c* t) / ((t + c) ** 2) * a * e^( bt / (t + c) )
-    """
-    a, b, c = 610.94, 17.625, 243.04
-    front = (b * temp / (temp + c)) * ((b * (temp + c) - b * c * temp) / ((temp + c) ** 2) * a)
-    return front * np.exp(b * temp / (temp + c))
+#                       but typically set to 0.95 according to SIMPLE model paper:
+#                       https://www.sciencedirect.com/science/article/pii/S1161030118304234#bib0205
 
 
 def calc_plant_available_water(paw_day_before, precipitation, irrigation, transpiration, deep_drainage_coef,
@@ -167,6 +146,28 @@ class RandomWeatherSchedule:
             'avg_vapor_pressure': np.maximum(0, rng.normal(4.04, 1, size=num_days)),  # hPa
             'mean_temp': mean_temp,  # degrees C; not in SIMPLE model
             'avg_wind': np.maximum(0, rng.normal(8, 6, size=num_days))  # m/s; not in SIMPLE model
+        })
+
+
+class ConstantWeatherSchedule:
+    """should subclass from some type of WeatherSchedule object that validates settings?"""
+
+    def __init__(self, num_days):
+        # all made up data, loosely based on starting May 1st in Hamer, ID
+        self.num_days = num_days
+        rng = np.random.default_rng()
+        max_temp = np.ones(num_days) * 15  # degrees C
+        min_temp = np.ones(num_days) * 2  # degrees C
+        mean_temp = np.ones(num_days) * 7.5  # degrees C
+        self.__dict__.update({
+            'max_temp': max_temp,  # degrees C
+            'min_temp': min_temp,  # degrees C
+            'precipitation': np.ones(num_days) * 0.05,  # mm
+            'radiation': np.ones(num_days) * 2,  # MJ/(m**2 * day)
+            'co2': np.ones(num_days) * 412,  # PPM
+            'avg_vapor_pressure': np.ones(num_days) * 4.04,  # hPa
+            'mean_temp': mean_temp,  # degrees C; not in SIMPLE model
+            'avg_wind': np.ones(num_days) * 8  # m/s; not in SIMPLE model
         })
 
 
@@ -354,8 +355,6 @@ class SimpleCropModelEnv(gym.Env):
         # penman_monteith function has rads in Joules, while rest of SIMPLE uses megajoules:
         # https://github.com/ajwdewit/pcse/blob/c40362be6a176dabe42a39b4526015b41cf23c48/pcse/util.py#L129
         rad_day_joules = 1e6 * rad_day
-        if avg_wind == 0:
-            print(avg_wind)
         ref_evapotranspiration = penman_monteith(self.date, self.latitude, self.elevation, min_temp_day, max_temp_day,
                                                  rad_day_joules, avg_vapor_pressure, avg_wind)
         transpiration = calc_transpiration(ref_evapotranspiration, self.plant_available_water)  # use PAW from today
@@ -367,7 +366,6 @@ class SimpleCropModelEnv(gym.Env):
                                                                 self.crop_root_zone_depth,
                                                                 self.crop_water_holding_capacity,
                                                                 self.crop_runoff_curve_number)
-        # todo: Validate ARID values
         arid_index = calc_arid(transpiration, ref_evapotranspiration)
         f_water = calc_f_water(self.crop_drought_stress_sensitivity, arid_index)
         self.crop_rad_50p_senescence = calc_rad_50p_senescence(self.crop_rad_50p_senescence, self.crop_rad_50p_max_heat,
@@ -383,11 +381,11 @@ class SimpleCropModelEnv(gym.Env):
         state = self.create_state()
 
         if self.day >= self.num_growing_days - 1:
-            return state, calc_yield(self.cumulative_biomass, self.crop_harvest_index), True, {}
+            return state, calc_yield(self.cumulative_biomass, self.crop_harvest_index), True, {'arid': arid_index, 'f_solar': f_solar}
 
         self.day += 1
         self.date += datetime.timedelta(days=1)
-        return state, 0, False, {}
+        return state, 0, False, {'arid': arid_index, 'f_solar': f_solar}
 
     def reset(self):
         self.cumulative_mean_temp = self.init_cumulative_temp  # TT variable in paper
@@ -404,34 +402,39 @@ class SimpleCropModelEnv(gym.Env):
 
 
 if __name__ == "__main__":
-    day = datetime.datetime.today()
-    temp_min = 23
-    temp_max = 25  # made up
-    avg_rad = 4
-    ET0 = penman_monteith(day, LAT, ELEV, temp_min, temp_max, avg_rad, VAP, WIND2)
-    T_i = calc_transpiration(ET0, 1)
-    # US potato constants
-    awc = 0.1
-    rcn = 64
-    ddc = 0.8
-    rzd = 1200
-    paw = calc_plant_available_water(0, 5, 2, T_i, ddc, rzd, awc, rcn)
-    ARID = calc_arid(T_i, ET0)
-
-    print(ARID)
-
-    growth_days = 100
+    growth_days = 1500
     start_date = datetime.datetime(day=1, month=5, year=2021)
-    weather = RandomWeatherSchedule(growth_days)
+    weather = ConstantWeatherSchedule(growth_days)  # RandomWeatherSchedule(growth_days)
     weather_stds = WeatherForecastSTDs()
     crop_params = PotatoRussetUSACropParametersSpec()
     env = SimpleCropModelEnv(start_date, growth_days, weather, WeatherForecastSTDs(), LAT, ELEV, crop_params, seed=0)
     env.reset()
     done = False
     iter = 0
+    biomasses = []
+    cum_temps = []
+    arids = []
+    f_solars = []
     while not done and iter < 1000000:
-        action = 100.0
+        action = 1000
         s, r, done, info = env.step(action)
         print(s['plant_available_water'])
         print("reward: ", r)
+        biomasses.append(s['cumulative_biomass'])
+        cum_temps.append(s['cumulative_mean_temp'])
+        arids.append(info['arid'])
+        f_solars.append(info['f_solar'])
         iter += 1
+
+    from matplotlib import pyplot as plt
+    plt.plot(np.array(biomasses) / 100, label='biomass')
+    plt.figure()
+    plt.plot(np.array(cum_temps), label='temp')
+    plt.figure()
+    plt.plot(np.array(arids), label='arid')
+    plt.title('arid')
+    plt.figure()
+    plt.plot(np.array(f_solars), label='f_solar')
+    plt.title('f_solar')
+    plt.legend()
+    plt.show()
