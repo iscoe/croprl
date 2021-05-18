@@ -9,5 +9,6 @@ def grams_per_square_meter_to_tons_per_hectare(biomass):
     # 1 hectare = 10,000 m**2
     # 1 metric ton = 1000 kg
     # See https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2007GB002947, which is ref'd in SIMPLE paper
-    # new_value = biomass * 10000 / (1000*1000) = biomass / 100
+    # (g/(m**2)) * (1 kg/ 1000 g) * (1 t / 1000 kg) * (10,000 m**2/ 1 h) = (1/100) t / h
+    # new_value = biomass * 10,000 / (1000*1000) = biomass / 100
     return biomass / 100
