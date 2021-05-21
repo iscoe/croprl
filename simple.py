@@ -1,3 +1,4 @@
+import gym
 import numpy as np
 import datetime
 import pandas
@@ -81,6 +82,7 @@ class BentonWACSVWeatherSchedule:
             'avg_wind': db[avg_wind_key].to_numpy() * ((60 * 60) / 1000)  # convert from km/h to m/s; not in SIMPLE
         })
 
+
     @staticmethod
     def actual_vapor_pressure(dewpoint):
         return 6.11 * 10 ** (7.5 * dewpoint / (237.3 + dewpoint))
@@ -145,11 +147,12 @@ if __name__ == "__main__":
     while not done and iter < 1000000:
         action = 1
         s, r, done, info = env.step(action)
-        print(s['plant_available_water'])
+        print("state:", s)
+        print(info['plant_available_water'])
         print("reward: ", r)
-        biomasses.append(s['cumulative_biomass'])
-        cum_temps.append(s['cumulative_mean_temp'])
-        arids.append(info['arid'])
+        biomasses.append(info['cumulative_biomass'])
+        cum_temps.append(info['cumulative_mean_temp'])
+        arids.append(info['arid_index'])
         f_solars.append(info['f_solar'])
         iter += 1
 

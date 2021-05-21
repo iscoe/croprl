@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 import datetime
 import gym
@@ -81,10 +83,16 @@ class SimpleCropModelEnv(gym.Env):
         self.weather_schedule = weather_schedule
         self.weather_forecast_stds = weather_forecast_stds
 
+        # gym parameters
+        self.observation_space = gym.spaces.Box(-np.inf, np.inf, shape=(30,), dtype=np.float64)
+        self.action_space = gym.spaces.Box(0, 1e9, shape=(1,), dtype=np.float64)
+        self.reward_range = (-np.inf, np.inf)
+        self.metadata = {}
+
     def weather_info(self, day, noisy=False):
         """return a weather info for a certain day"""
         if day >= self.num_growing_days:
-            return np.array([])
+            return np.array([0, 0, 0, 0, 0, 0, 0, 0])
         if not noisy:
             return np.array(
                 [self.weather_schedule.max_temp[day],  # degrees C
@@ -111,7 +119,7 @@ class SimpleCropModelEnv(gym.Env):
                  ]
             )
 
-    def create_state(self):
+    def create_dict_state(self):
         """
         Things to include in the state would be:
             - Actual cumulative biomass
@@ -124,18 +132,31 @@ class SimpleCropModelEnv(gym.Env):
             - Root zone available water reading (like a soil measurement?)
             - Noisy reading of root zone available water
         """
-        return {'cumulative_biomass': self.cumulative_biomass,
-                'cumulative_biomass_noisy': max(0, self.rng.normal(self.cumulative_biomass,
-                                                                   self.cumulative_biomass_sigma)),
-                'cumulative_mean_temp': self.cumulative_mean_temp,
-                'day': self.day,
+        return {'cumulative_biomass': np.array(self.cumulative_biomass).reshape((1,)),
+                'cumulative_biomass_noisy':
+                    np.array(max(0, self.rng.normal(self.cumulative_biomass,
+                                                    self.cumulative_biomass_sigma))).reshape((1,)),
+                'cumulative_mean_temp': np.array(self.cumulative_mean_temp).reshape((1,)),
+                'day': np.array(self.day).reshape((1,)),
                 'weather_today': self.weather_info(self.day),
                 'weather_tomorrow': self.weather_info(self.day + 1),
                 'weather_tomorrow_forecast': self.weather_info(self.day + 1, noisy=True),
-                'plant_available_water': self.plant_available_water,
-                'plant_available_water_noisy': max(0, self.rng.normal(self.plant_available_water,
-                                                                      self.plant_available_water_sigma))
+                'plant_available_water': np.array(self.plant_available_water).reshape((1,)),
+                'plant_available_water_noisy':
+                    np.array(max(0,
+                                 self.rng.normal(self.plant_available_water,
+                                                 self.plant_available_water_sigma))).reshape((1,))
                 }
+
+    @staticmethod
+    def create_numpy_state(dict_state: dict):
+        return np.concatenate([v for v in dict_state.values()])
+
+    @staticmethod
+    def create_info(dict_state: dict, additional_info: dict):
+        info = copy.deepcopy(dict_state)
+        info.update(additional_info)
+        return info
 
     def irrigation_reward(self, irrigation):
         # assume irrigation is for a non-towable center pivot, and consider
@@ -154,7 +175,7 @@ class SimpleCropModelEnv(gym.Env):
         avg_vapor_pressure = self.weather_schedule.avg_vapor_pressure[self.day]
         avg_wind = self.weather_schedule.avg_wind[self.day]
         precipitation = self.weather_schedule.precipitation[self.day]
-        irrigation = action
+        irrigation = action[0]
         co2_day = self.weather_schedule.co2[self.day]
 
         self.cumulative_mean_temp += delta_cumulative_temp(mean_temp_day, self.crop_temp_base)
@@ -187,15 +208,17 @@ class SimpleCropModelEnv(gym.Env):
         self.cumulative_biomass = calc_cumulative_biomass(self.cumulative_biomass, biomass_rate)
 
         # do this before updating day to get accurate states
-        state = self.create_state()
+        dict_state = self.create_dict_state()
+        state = self.create_numpy_state(dict_state)
+        info = self.create_info(dict_state, {'arid_index': arid_index, 'f_solar': f_solar})
 
         if self.day >= self.num_growing_days - 1:
             reward = calc_yield(self.cumulative_biomass, self.crop_harvest_index) + self.irrigation_reward(irrigation)
-            return state, reward, True, {'arid': arid_index, 'f_solar': f_solar}
+            return state, reward, True, info
 
         self.day += 1
         self.date += datetime.timedelta(days=1)
-        return state, self.irrigation_reward(irrigation), False, {'arid': arid_index, 'f_solar': f_solar}
+        return state, self.irrigation_reward(irrigation), False, info
 
     def reset(self):
         self.cumulative_mean_temp = self.init_cumulative_temp  # TT variable in paper
@@ -205,7 +228,7 @@ class SimpleCropModelEnv(gym.Env):
         self.plant_available_water = self.initial_plant_available_water
         self.date = self.sowing_date
         self.day = 0
-        return self.create_state()
+        return self.create_numpy_state(self.create_dict_state())
 
     def render(self, mode='human'):
         pass
