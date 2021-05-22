@@ -14,14 +14,38 @@ from ray.tune.schedulers import ASHAScheduler
 import numpy as np
 
 
+class SimpleCropModelEnvWrapper(gym.ObservationWrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.observation_space = gym.spaces.Box(-np.inf, np.inf, shape=(20,), dtype=np.float64)
+
+    def observation(self, observation):
+        """
+        Realistic observations include:
+            - Noisy reading of cumulative biomass (such as might be estimated from an image of the plant?)
+            - Cumulative mean temp (seems relatively measurable)
+            - Days since sowing date
+            - Weather from last day
+            - Noisy reading of root zone available water
+        which correspond to
+            - noisy biomass: obs[1]
+            - cumulative mean temp: obs[2]
+            - Day: obs[3]
+            - Today's weather: obs[4: 11]
+            - Tomorrows forecast (noisy ground truth): obs[19: 27]
+            - Noisy RZW: obs[29]
+        """
+        return observation[list(range(1, 12)) + list(range(19, 27)) + [29]]
+
+
 def register():
-    register_env("SimpleModelEnv", lambda cfg: SimpleCropModelEnv(**cfg))
+    register_env("SimpleModelEnv", lambda cfg: SimpleCropModelEnvWrapper(SimpleCropModelEnv(**cfg)))
     # ModelCatalog.register_custom_model("atari", AtariNetwork)
 
 
 def train_on_simple():
     ray.init(ignore_reinit_error=True,
-             num_cpus=2)
+             num_cpus=5)
 
     # config = sac.DEFAULT_CONFIG.copy()
     config = ppo.DEFAULT_CONFIG.copy()
@@ -33,10 +57,10 @@ def train_on_simple():
     # config['model'] = dict(custom_model="atari", custom_model_config={'policy_dim': 6})
     config['framework'] = 'torch'
 
-    config["num_workers"] = 1  # from ETN defaults
+    config["num_workers"] = 4  # from ETN defaults
     # config['lr'] = 0.00025  # from ETN defaults
     # config['lambda'] = 0.95  # from ETN defaults
-    # config["timesteps_per_iteration"] = 64
+    config["timesteps_per_iteration"] = 240
     # config['vf_loss_coeff'] = ray.tune.grid_search([0.5, 0.8, 1.0])  # from ETN defaults
     # config['clip_param'] = 0.2  # from ETN defaults
 
@@ -75,7 +99,7 @@ def train_on_simple():
 
     ray.tune.run("PPO",
                  local_dir='./ray_results/',
-                 stop={"timesteps_total": 1e6, "episode_reward_mean": 50000},
+                 stop={"timesteps_total": 1e6, "episode_reward_mean": 60000},
                  checkpoint_freq=10000,
                  checkpoint_at_end=True,
                  config=config)

@@ -55,6 +55,7 @@ class SimpleCropModelEnv(gym.Env):
 
         # variables for reset
         self.init_cumulative_temp = initial_cumulative_temp
+        self.init_crop_rad_50p_senescence = crop_parameters.rad_50p_senescence
         self.init_biomass = initial_biomass
         self.sowing_date = sowing_date
 
@@ -223,6 +224,7 @@ class SimpleCropModelEnv(gym.Env):
     def reset(self):
         self.cumulative_mean_temp = self.init_cumulative_temp  # TT variable in paper
         self.cumulative_biomass = self.init_biomass
+        self.crop_rad_50p_senescence = self.init_crop_rad_50p_senescence
         # root zone available water (W_i) = root zone available water content (theta^{ad}_{a, i} or PAW) times the root
         # zone depth (RZD)
         self.plant_available_water = self.initial_plant_available_water

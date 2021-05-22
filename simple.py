@@ -145,7 +145,7 @@ if __name__ == "__main__":
     arids = []
     f_solars = []
     while not done and iter < 1000000:
-        action = 1
+        action = [10]
         s, r, done, info = env.step(action)
         print("state:", s)
         print(info['plant_available_water'])
