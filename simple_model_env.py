@@ -86,7 +86,7 @@ class SimpleCropModelEnv(gym.Env):
 
         # gym parameters
         self.observation_space = gym.spaces.Box(-np.inf, np.inf, shape=(30,), dtype=np.float64)
-        self.action_space = gym.spaces.Box(0, 1e9, shape=(1,), dtype=np.float64)
+        self.action_space = gym.spaces.Box(0, 100, shape=(1,), dtype=np.float64)
         self.reward_range = (-np.inf, np.inf)
         self.metadata = {}
 
@@ -110,13 +110,14 @@ class SimpleCropModelEnv(gym.Env):
             return np.array(
                 [self.rng.normal(self.weather_schedule.max_temp[day], self.weather_forecast_stds.max_temp),
                  self.rng.normal(self.weather_schedule.min_temp[day], self.weather_forecast_stds.min_temp),
-                 self.rng.normal(self.weather_schedule.precipitation[day], self.weather_forecast_stds.precipitation),
-                 self.rng.normal(self.weather_schedule.radiation[day], self.weather_forecast_stds.radiation),
-                 self.rng.normal(self.weather_schedule.co2[day], self.weather_forecast_stds.co2),
-                 self.rng.normal(self.weather_schedule.avg_vapor_pressure[day],
-                                 self.weather_forecast_stds.avg_vapor_pressure),
+                 max(0.0, self.rng.normal(self.weather_schedule.precipitation[day],
+                                          self.weather_forecast_stds.precipitation)),
+                 max(0.0, self.rng.normal(self.weather_schedule.radiation[day], self.weather_forecast_stds.radiation)),
+                 max(0.0, self.rng.normal(self.weather_schedule.co2[day], self.weather_forecast_stds.co2)),
+                 max(0.0, self.rng.normal(self.weather_schedule.avg_vapor_pressure[day],
+                                          self.weather_forecast_stds.avg_vapor_pressure)),
                  self.rng.normal(self.weather_schedule.mean_temp[day], self.weather_forecast_stds.mean_temp),
-                 self.rng.normal(self.weather_schedule.avg_wind[day], self.weather_forecast_stds.avg_wind)
+                 max(0.0, self.rng.normal(self.weather_schedule.avg_wind[day], self.weather_forecast_stds.avg_wind))
                  ]
             )
 
@@ -178,6 +179,9 @@ class SimpleCropModelEnv(gym.Env):
         precipitation = self.weather_schedule.precipitation[self.day]
         irrigation = action[0]
         co2_day = self.weather_schedule.co2[self.day]
+
+        if irrigation < 0:
+            raise ValueError("Action cannot be negative! Got {}".format(irrigation))
 
         self.cumulative_mean_temp += delta_cumulative_temp(mean_temp_day, self.crop_temp_base)
         f_heat = calc_f_heat(max_temp_day, self.crop_heat_stress_thresh, self.crop_heat_stress_extreme)

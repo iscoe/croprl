@@ -60,7 +60,7 @@ def train_on_simple():
     config["num_workers"] = 4  # from ETN defaults
     # config['lr'] = 0.00025  # from ETN defaults
     # config['lambda'] = 0.95  # from ETN defaults
-    config["timesteps_per_iteration"] = 240
+    # config["timesteps_per_iteration"] = 240
     # config['vf_loss_coeff'] = ray.tune.grid_search([0.5, 0.8, 1.0])  # from ETN defaults
     # config['clip_param'] = 0.2  # from ETN defaults
 
@@ -69,7 +69,7 @@ def train_on_simple():
 
     csv_path = '/Users/ashcrcc1/Downloads/Daily Data  AgWeatherNet at Washington State University.csv'
     env_cfg = dict(
-        sowing_date=datetime.datetime(day=1, month=5, year=2021),
+        sowing_date=datetime.datetime(day=1, month=4, year=2000),
         num_growing_days=120,
         weather_schedule=BentonWACSVWeatherSchedule(csv_path),
         weather_forecast_stds=WeatherForecastSTDs(),
@@ -99,8 +99,8 @@ def train_on_simple():
 
     ray.tune.run("PPO",
                  local_dir='./ray_results/',
-                 stop={"timesteps_total": 1e6, "episode_reward_mean": 60000},
-                 checkpoint_freq=10000,
+                 stop={"agent_timesteps_total": 1000000, "episode_reward_mean": 60000},
+                 checkpoint_freq=50,
                  checkpoint_at_end=True,
                  config=config)
 

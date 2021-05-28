@@ -61,6 +61,8 @@ class ConstantWeatherSchedule:
 
 class BentonWACSVWeatherSchedule:
     # todo: Define WeatherSchedule interface
+    # Loads data from Benton E. station reading from https://weather.wsu.edu/?p=93050,
+    # original version of data starts April 1st 2000 and goes 180 days
     def __init__(self, csv):
         db = pandas.read_csv(csv)
         max_temp_key = db.columns[4]
@@ -144,20 +146,26 @@ if __name__ == "__main__":
     cum_temps = []
     arids = []
     f_solars = []
+    paw = []
+    cum_reward = 0
     while not done and iter < 1000000:
         action = [10]
         s, r, done, info = env.step(action)
+        cum_reward += r
         print("state:", s)
         print(info['plant_available_water'])
         print("reward: ", r)
+        paw.append(info['plant_available_water'])
         biomasses.append(info['cumulative_biomass'])
         cum_temps.append(info['cumulative_mean_temp'])
         arids.append(info['arid_index'])
         f_solars.append(info['f_solar'])
         iter += 1
 
+    print("cumulative reward:", cum_reward)
+
     from matplotlib import pyplot as plt
-    plt.plot(np.array(biomasses) / 100, label='biomass')
+    plt.plot(np.array(biomasses), label='biomass (t/hect)')
     plt.title('biomass')
     plt.figure()
     plt.plot(np.array(cum_temps), label='temp')
@@ -165,6 +173,9 @@ if __name__ == "__main__":
     plt.figure()
     plt.plot(np.array(arids), label='arid')
     plt.title('arid')
+    plt.figure()
+    plt.plot(np.array(paw), label='paw')
+    plt.title('paw')
     plt.figure()
     plt.plot(np.array(f_solars), label='f_solar')
     plt.title('f_solar')
