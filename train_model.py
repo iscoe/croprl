@@ -67,7 +67,7 @@ def train_on_simple():
 
     # PPO config
 
-    csv_path = '/Users/ashcrcc1/Downloads/Daily Data  AgWeatherNet at Washington State University.csv'
+    csv_path = 'data/daily_weather_ag_data_washstateu.csv'
     env_cfg = dict(
         sowing_date=datetime.datetime(day=1, month=4, year=2000),
         num_growing_days=120,

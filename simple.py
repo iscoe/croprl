@@ -1,7 +1,7 @@
 import gym
 import numpy as np
 import datetime
-import pandas
+import pandas as pd
 
 from simple_model_env import SimpleCropModelEnv
 
@@ -14,7 +14,6 @@ VAP = 4.04  # vapor pressure in Hamer ID on 24 Apr 2021 based on a temp of 54F a
 F_SOLAR_MAX = 0.95  # the maximum fraction of radiation interception that a crop can reach, governed by plant spacings,
 #                       but typically set to 0.95 according to SIMPLE model paper:
 #                       https://www.sciencedirect.com/science/article/pii/S1161030118304234#bib0205
-
 
 class RandomWeatherSchedule:
     """should subclass from some type of WeatherSchedule object that validates settings?"""
@@ -64,7 +63,7 @@ class BentonWACSVWeatherSchedule:
     # Loads data from Benton E. station reading from https://weather.wsu.edu/?p=93050,
     # original version of data starts April 1st 2000 and goes 180 days
     def __init__(self, csv):
-        db = pandas.read_csv(csv)
+        db = pd.read_csv(csv)
         max_temp_key = db.columns[4]
         min_temp_key = db.columns[2]
         precip_key = db.columns[15]
@@ -89,7 +88,6 @@ class BentonWACSVWeatherSchedule:
     def actual_vapor_pressure(dewpoint):
         return 6.11 * 10 ** (7.5 * dewpoint / (237.3 + dewpoint))
 
-
 class WeatherForecastSTDs:
     # todo: Define WeatherForcastSTDs interface
     def __init__(self):
@@ -103,7 +101,6 @@ class WeatherForecastSTDs:
             'mean_temp': 2,  # degrees C; not in SIMPLE model
             'avg_wind': 6  # m/s; not in SIMPLE model
         })
-
 
 class PotatoRussetUSACropParametersSpec:
     # Todo: Define CropParameterSpec interface
@@ -134,7 +131,7 @@ if __name__ == "__main__":
     growth_days = 180
     start_date = datetime.datetime(day=1, month=5, year=2021)
     # weather = ConstantWeatherSchedule(growth_days)  # RandomWeatherSchedule(growth_days)
-    csv_path = '/Users/ashcrcc1/Downloads/Daily Data  AgWeatherNet at Washington State University.csv'
+    csv_path = 'data/daily_weather_ag_data_washstateu.csv'
     weather = BentonWACSVWeatherSchedule(csv_path)
     weather_stds = WeatherForecastSTDs()
     crop_params = PotatoRussetUSACropParametersSpec()
