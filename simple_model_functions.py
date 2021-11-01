@@ -1,3 +1,10 @@
+# Copyright 2020-2021, The Johns Hopkins University Applied Physics Laboratory LLC
+# All rights reserved.
+# Distributed under the terms of the Apache 2.0 License.
+
+import numpy as np
+from pcse.util import penman_monteith
+
 """
 Implementations of the functions given in the SIMPLE paper:?
 
@@ -5,9 +12,6 @@ https://www.sciencedirect.com/science/article/pii/S1161030118304234
 
 used to step the crop model.
 """
-
-import numpy as np
-from pcse.util import penman_monteith
 
 F_SOLAR_MAX = 0.95  # the maximum fraction of radiation interception that a crop can reach, governed by plant spacings,
 

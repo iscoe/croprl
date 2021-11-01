@@ -1,3 +1,7 @@
+# Copyright 2020-2021, The Johns Hopkins University Applied Physics Laboratory LLC
+# All rights reserved.
+# Distributed under the terms of the Apache 2.0 License.
+
 import numpy as np
 
 hamer_avg_lows = {"May": 2, "Jun": 6, "Jul": 9, "Aug": 8, "Sep": 3, "Oct": -3}
